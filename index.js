@@ -1,9 +1,18 @@
+process.on("uncaughtException", (err) => {
+  console.error("❌ Uncaught Exception:", err);
+});
+
+process.on("unhandledRejection", (err) => {
+  console.error("❌ Unhandled Rejection:", err);
+});
+
 const express = require("express");
 const vision = require("@google-cloud/vision");
 const { google } = require("googleapis");
+const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json());
 
 // =============================
 // 🔐 PARSEO SEGURO DE CREDENCIALES
@@ -45,6 +54,21 @@ const auth = new google.auth.GoogleAuth({
 });
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+
+let visionClient;
+
+try {
+  if (process.env.GOOGLE_CREDENTIALS) {
+    visionClient = new vision.ImageAnnotatorClient({
+      credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
+    });
+    console.log("✅ Vision inicializado");
+  } else {
+    console.log("⚠️ GOOGLE_CREDENTIALS no definido");
+  }
+} catch (error) {
+  console.error("❌ Error inicializando Vision:", error);
+}
 
 // =============================
 // 🧠 FUNCIÓN PARA PARSEAR EXTRACTO
@@ -151,6 +175,6 @@ app.post("/", async (req, res) => {
 
 const PORT = process.env.PORT || 8080;
 
-app.listen(PORT, () => {
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
 });
