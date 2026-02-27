@@ -98,7 +98,7 @@ app.post("/", async (req, res) => {
     const { image } = req.body;
 
     if (!image) {
-      return res.status(400).json({ error: "No se recibió imagen" });
+      return res.status(400).json({ error: "No se recibió un body" });
     }
 
     const [result] = await visionClient.textDetection({
