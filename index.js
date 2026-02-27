@@ -20,56 +20,50 @@ app.use(express.json({ limit: "10mb" }));
 let credentials;
 
 try {
-  if (!process.env.GOOGLE_CREDENTIALS) {
+  const raw = process.env.GOOGLE_CREDENTIALS;
+
+  if (!raw) {
     throw new Error("GOOGLE_CREDENTIALS no está definida");
   }
 
   credentials = JSON.parse(
-    process.env.GOOGLE_CREDENTIALS
+    raw
       .replace(/\\n/g, "\n")
       .trim()
   );
 
-  console.log("Credenciales cargadas correctamente");
+  console.log("Credenciales parseadas correctamente");
 
 } catch (error) {
-  console.error("Error cargando credenciales:", error.message);
+  console.error("Error parseando credenciales:", error.message);
+  process.exit(1);
 }
 
 // =============================
 // 🔍 CLIENTES GOOGLE
 // =============================
 
-let visionClient;
-let auth;
+const visionClient = new vision.ImageAnnotatorClient({
+  credentials
+});
 
-try {
-  visionClient = new vision.ImageAnnotatorClient({
-    credentials
-  });
-
-  auth = new google.auth.GoogleAuth({
-    credentials,
-    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-  });
-
-  console.log("Clientes Google inicializados");
-
-} catch (error) {
-  console.error("Error inicializando clientes:", error.message);
-}
+const auth = new google.auth.GoogleAuth({
+  credentials,
+  scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+});
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
 // =============================
-// 🧠 PARSEO EXTRACTO
+// 🧠 FUNCIÓN PARA PARSEAR EXTRACTO
+// Estructura: fecha | descripción | referencia | valor
 // =============================
 
 function parseExtracto(text) {
   const lines = text.split("\n");
   const movimientos = [];
 
-  const regex = /^(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(-?[\d.,]+)/;
+  const regex = /^(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(-?\$?[\d.,]+)/;
 
   for (const line of lines) {
     const match = line.match(regex);
@@ -80,6 +74,7 @@ function parseExtracto(text) {
       let valorRaw = match[3];
 
       valorRaw = valorRaw
+        .replace(/\$/g, "")
         .replace(/\./g, "")
         .replace(",", ".");
 
@@ -93,14 +88,6 @@ function parseExtracto(text) {
 
   return movimientos;
 }
-
-// =============================
-// 📌 ENDPOINT TEST
-// =============================
-
-app.get("/", (req, res) => {
-  res.json({ status: "Bot financiero activo" });
-});
 
 // =============================
 // 📌 ENDPOINT PRINCIPAL
@@ -125,6 +112,7 @@ app.post("/", async (req, res) => {
     }
 
     const text = detections[0].description;
+
     const movimientos = parseExtracto(text);
 
     if (movimientos.length === 0) {
@@ -149,16 +137,15 @@ app.post("/", async (req, res) => {
 
   } catch (error) {
     console.error("Error general:", error);
-
     res.status(500).json({
-      error: "Error interno",
+      error: "Error interno del servidor",
       detalle: error.message
     });
   }
 });
 
 // =============================
-// 🚀 CLOUD RUN
+// 🚀 SERVIDOR CLOUD RUN
 // =============================
 
 const PORT = process.env.PORT || 8080;
