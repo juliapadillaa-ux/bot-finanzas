@@ -1,18 +1,17 @@
 process.on("uncaughtException", (err) => {
-  console.error("❌ Uncaught Exception:", err);
+  console.error("Uncaught Exception:", err);
 });
 
 process.on("unhandledRejection", (err) => {
-  console.error("❌ Unhandled Rejection:", err);
+  console.error("Unhandled Rejection:", err);
 });
 
 const express = require("express");
 const vision = require("@google-cloud/vision");
 const { google } = require("googleapis");
-const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
 
 const app = express();
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 // =============================
 // 🔐 PARSEO SEGURO DE CREDENCIALES
@@ -21,65 +20,56 @@ app.use(express.json());
 let credentials;
 
 try {
-  const raw = process.env.GOOGLE_CREDENTIALS;
-
-  if (!raw) {
+  if (!process.env.GOOGLE_CREDENTIALS) {
     throw new Error("GOOGLE_CREDENTIALS no está definida");
   }
 
   credentials = JSON.parse(
-    raw
+    process.env.GOOGLE_CREDENTIALS
       .replace(/\\n/g, "\n")
       .trim()
   );
 
-  console.log("✅ Credenciales parseadas correctamente");
+  console.log("Credenciales cargadas correctamente");
 
 } catch (error) {
-  console.error("❌ Error parseando credenciales:", error.message);
-  process.exit(1);
+  console.error("Error cargando credenciales:", error.message);
 }
 
 // =============================
 // 🔍 CLIENTES GOOGLE
 // =============================
 
-const visionClient = new vision.ImageAnnotatorClient({
-  credentials
-});
+let visionClient;
+let auth;
 
-const auth = new google.auth.GoogleAuth({
-  credentials,
-  scopes: ["https://www.googleapis.com/auth/spreadsheets"]
-});
+try {
+  visionClient = new vision.ImageAnnotatorClient({
+    credentials
+  });
+
+  auth = new google.auth.GoogleAuth({
+    credentials,
+    scopes: ["https://www.googleapis.com/auth/spreadsheets"]
+  });
+
+  console.log("Clientes Google inicializados");
+
+} catch (error) {
+  console.error("Error inicializando clientes:", error.message);
+}
 
 const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
 
-let visionClient;
-
-try {
-  if (process.env.GOOGLE_CREDENTIALS) {
-    visionClient = new vision.ImageAnnotatorClient({
-      credentials: JSON.parse(process.env.GOOGLE_CREDENTIALS)
-    });
-    console.log("✅ Vision inicializado");
-  } else {
-    console.log("⚠️ GOOGLE_CREDENTIALS no definido");
-  }
-} catch (error) {
-  console.error("❌ Error inicializando Vision:", error);
-}
-
 // =============================
-// 🧠 FUNCIÓN PARA PARSEAR EXTRACTO
-// Estructura: fecha | descripción | referencia | valor
+// 🧠 PARSEO EXTRACTO
 // =============================
 
 function parseExtracto(text) {
   const lines = text.split("\n");
   const movimientos = [];
 
-  const regex = /^(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(-?\$?[\d.,]+)/;
+  const regex = /^(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(-?[\d.,]+)/;
 
   for (const line of lines) {
     const match = line.match(regex);
@@ -89,7 +79,10 @@ function parseExtracto(text) {
       const descripcion = match[2].trim();
       let valorRaw = match[3];
 
-      valorRaw = valorRaw.replace(/\$/g, "").replace(/\./g, "").replace(",", ".");
+      valorRaw = valorRaw
+        .replace(/\./g, "")
+        .replace(",", ".");
+
       const valor = parseFloat(valorRaw);
 
       if (!isNaN(valor)) {
@@ -100,6 +93,14 @@ function parseExtracto(text) {
 
   return movimientos;
 }
+
+// =============================
+// 📌 ENDPOINT TEST
+// =============================
+
+app.get("/", (req, res) => {
+  res.json({ status: "Bot financiero activo" });
+});
 
 // =============================
 // 📌 ENDPOINT PRINCIPAL
@@ -113,8 +114,6 @@ app.post("/", async (req, res) => {
       return res.status(400).json({ error: "No se recibió imagen" });
     }
 
-    console.log("📷 Procesando imagen...");
-
     const [result] = await visionClient.textDetection({
       image: { content: image }
     });
@@ -126,20 +125,11 @@ app.post("/", async (req, res) => {
     }
 
     const text = detections[0].description;
-
-    console.log("🧾 Texto detectado correctamente");
-
     const movimientos = parseExtracto(text);
 
     if (movimientos.length === 0) {
       return res.status(400).json({ error: "No se encontraron movimientos válidos" });
     }
-
-    console.log(`💰 Movimientos encontrados: ${movimientos.length}`);
-
-    // =============================
-    // 📊 GUARDAR EN GOOGLE SHEETS
-    // =============================
 
     const sheets = google.sheets({ version: "v4", auth });
 
@@ -152,29 +142,27 @@ app.post("/", async (req, res) => {
       }
     });
 
-    console.log("✅ Datos guardados en Sheets");
-
     res.json({
       status: "ok",
       movimientos_guardados: movimientos.length
     });
 
   } catch (error) {
-    console.error("❌ Error general:", error.message);
+    console.error("Error general:", error);
 
     res.status(500).json({
-      error: "Error interno del servidor",
+      error: "Error interno",
       detalle: error.message
     });
   }
 });
 
 // =============================
-// 🚀 SERVIDOR CLOUD RUN
+// 🚀 CLOUD RUN
 // =============================
 
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, "0.0.0.0", () => {
-  console.log(`🚀 Servidor corriendo en puerto ${PORT}`);
+  console.log(`Servidor corriendo en puerto ${PORT}`);
 });
