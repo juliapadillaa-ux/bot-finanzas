@@ -7,35 +7,29 @@ process.on("unhandledRejection", (err) => {
 });
 
 const express = require("express");
+const fetch = require("node-fetch");
 const vision = require("@google-cloud/vision");
+const speech = require("@google-cloud/speech");
 const { google } = require("googleapis");
 
 const app = express();
-app.use(express.json({ limit: "10mb" }));
+app.use(express.json({ limit: "20mb" }));
 
 // =============================
-// 🔐 PARSEO SEGURO DE CREDENCIALES
+// 🔐 CREDENCIALES DESDE SECRET
 // =============================
 
-let credentials;
+if (!process.env.GOOGLE_CREDENTIALS) {
+  console.error("GOOGLE_CREDENTIALS no definida");
+  process.exit(1);
+}
 
-try {
-  const raw = process.env.GOOGLE_CREDENTIALS;
+const credentials = JSON.parse(process.env.GOOGLE_CREDENTIALS);
+const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
+const TELEGRAM_TOKEN = process.env.TELEGRAM_TOKEN;
 
-  if (!raw) {
-    throw new Error("GOOGLE_CREDENTIALS no está definida");
-  }
-
-  credentials = JSON.parse(
-    raw
-      .replace(/\\n/g, "\n")
-      .trim()
-  );
-
-  console.log("Credenciales parseadas correctamente");
-
-} catch (error) {
-  console.error("Error parseando credenciales:", error.message);
+if (!SPREADSHEET_ID || !TELEGRAM_TOKEN) {
+  console.error("Faltan variables de entorno");
   process.exit(1);
 }
 
@@ -43,43 +37,35 @@ try {
 // 🔍 CLIENTES GOOGLE
 // =============================
 
-const visionClient = new vision.ImageAnnotatorClient({
-  credentials
-});
+const visionClient = new vision.ImageAnnotatorClient({ credentials });
+
+const speechClient = new speech.SpeechClient({ credentials });
 
 const auth = new google.auth.GoogleAuth({
   credentials,
   scopes: ["https://www.googleapis.com/auth/spreadsheets"]
 });
 
-const SPREADSHEET_ID = process.env.SPREADSHEET_ID;
-
 // =============================
-// 🧠 FUNCIÓN PARA PARSEAR EXTRACTO
-// Estructura: fecha | descripción | referencia | valor
+// 🧠 PARSER EXTRACTOS
 // =============================
 
 function parseExtracto(text) {
   const lines = text.split("\n");
   const movimientos = [];
-
   const regex = /^(\d{2}\/\d{2}\/\d{4})\s+(.+?)\s+(-?\$?[\d.,]+)/;
 
   for (const line of lines) {
     const match = line.match(regex);
-
     if (match) {
-      const fecha = match[1].trim();
-      const descripcion = match[2].trim();
-      let valorRaw = match[3];
-
-      valorRaw = valorRaw
+      const fecha = match[1];
+      const descripcion = match[2];
+      let valorRaw = match[3]
         .replace(/\$/g, "")
         .replace(/\./g, "")
         .replace(",", ".");
 
       const valor = parseFloat(valorRaw);
-
       if (!isNaN(valor)) {
         movimientos.push([fecha, descripcion, valor]);
       }
@@ -90,62 +76,129 @@ function parseExtracto(text) {
 }
 
 // =============================
-// 📌 ENDPOINT PRINCIPAL
+// 📊 GUARDAR EN SHEETS
+// =============================
+
+async function guardarEnSheets(filas) {
+  const sheets = google.sheets({ version: "v4", auth });
+
+  await sheets.spreadsheets.values.append({
+    spreadsheetId: SPREADSHEET_ID,
+    range: "Hoja1!A:C",
+    valueInputOption: "USER_ENTERED",
+    requestBody: { values: filas }
+  });
+}
+
+// =============================
+// 🤖 TELEGRAM ENDPOINT
 // =============================
 
 app.post("/", async (req, res) => {
   try {
-    const { image } = req.body;
+    const message = req.body.message;
+    if (!message) return res.sendStatus(200);
 
-    if (!image) {
-      return res.status(400).json({ error: "No se recibió un body" });
-    }
+    const chatId = message.chat.id;
 
-    const [result] = await visionClient.textDetection({
-      image: { content: image }
-    });
+    // =============================
+    // 📷 FOTO (OCR)
+    // =============================
 
-    const detections = result.textAnnotations;
+    if (message.photo) {
+      const photo = message.photo.pop();
+      const fileInfo = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${photo.file_id}`
+      ).then(r => r.json());
 
-    if (!detections || detections.length === 0) {
-      return res.status(400).json({ error: "No se detectó texto" });
-    }
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.result.file_path}`;
+      const buffer = await fetch(fileUrl).then(r => r.buffer());
+      const base64 = buffer.toString("base64");
 
-    const text = detections[0].description;
+      const [result] = await visionClient.textDetection({
+        image: { content: base64 }
+      });
 
-    const movimientos = parseExtracto(text);
+      const text = result.textAnnotations[0]?.description || "";
+      const movimientos = parseExtracto(text);
 
-    if (movimientos.length === 0) {
-      return res.status(400).json({ error: "No se encontraron movimientos válidos" });
-    }
-
-    const sheets = google.sheets({ version: "v4", auth });
-
-    await sheets.spreadsheets.values.append({
-      spreadsheetId: SPREADSHEET_ID,
-      range: "Hoja1!A:C",
-      valueInputOption: "USER_ENTERED",
-      requestBody: {
-        values: movimientos
+      if (movimientos.length > 0) {
+        await guardarEnSheets(movimientos);
+        await enviarMensaje(chatId, `Se guardaron ${movimientos.length} movimientos ✅`);
+      } else {
+        await enviarMensaje(chatId, "No se detectaron movimientos válidos.");
       }
-    });
+    }
 
-    res.json({
-      status: "ok",
-      movimientos_guardados: movimientos.length
-    });
+    // =============================
+    // 🎤 VOZ (Speech to Text)
+    // =============================
+
+    else if (message.voice) {
+      const fileInfo = await fetch(
+        `https://api.telegram.org/bot${TELEGRAM_TOKEN}/getFile?file_id=${message.voice.file_id}`
+      ).then(r => r.json());
+
+      const fileUrl = `https://api.telegram.org/file/bot${TELEGRAM_TOKEN}/${fileInfo.result.file_path}`;
+      const audioBuffer = await fetch(fileUrl).then(r => r.buffer());
+
+      const audioBytes = audioBuffer.toString("base64");
+
+      const [response] = await speechClient.recognize({
+        audio: { content: audioBytes },
+        config: {
+          encoding: "OGG_OPUS",
+          sampleRateHertz: 48000,
+          languageCode: "es-CO"
+        }
+      });
+
+      const transcription =
+        response.results.map(r => r.alternatives[0].transcript).join("\n");
+
+      await guardarEnSheets([[new Date().toLocaleDateString(), "Registro por voz", transcription]]);
+      await enviarMensaje(chatId, "Mensaje de voz registrado ✅");
+    }
+
+    // =============================
+    // 📄 TEXTO NORMAL
+    // =============================
+
+    else if (message.text) {
+
+      if (message.text === "/reporte") {
+        await enviarMensaje(chatId, "Reporte generado en Google Sheets 📊");
+      } else {
+        await guardarEnSheets([[new Date().toLocaleDateString(), "Texto", message.text]]);
+        await enviarMensaje(chatId, "Texto registrado ✅");
+      }
+    }
+
+    res.sendStatus(200);
 
   } catch (error) {
     console.error("Error general:", error);
-    res.status(500).json({
-      error: "Error interno del servidor",
-      detalle: error.message
-    });
+    res.sendStatus(500);
   }
 });
 
 // =============================
-// 🚀 SERVIDOR CLOUD RUN
+// 📩 ENVIAR MENSAJE TELEGRAM
+// =============================
+
+async function enviarMensaje(chatId, text) {
+  await fetch(`https://api.telegram.org/bot${TELEGRAM_TOKEN}/sendMessage`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      chat_id: chatId,
+      text
+    })
+  });
+}
+
+// =============================
+// 🚀 CLOUD RUN SERVER
 // =============================
 
 const PORT = process.env.PORT || 8080;
